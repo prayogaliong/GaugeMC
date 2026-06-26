@@ -23,16 +23,26 @@ use std::sync::{Arc, LazyLock};
 pub struct CudaBackend {
     nreplicas: usize,
     bounds: SiteIndex,
-    potential_size: usize,
+    
     stream: Arc<CudaStream>,
     state: CudaSlice<i32>,
+
+    potential_size: usize,
     potential_redirect_buffer: CudaSlice<u32>,
     potential_redirect_array: RedirectArrays,
     potential_buffer: CudaSlice<f32>,
+
+    //added
+    edge_potential_size: usize,
+    edge_potential_redirect_buffer: CudaSlice<u32>,
+    edge_potential_redirect_array: RedirectArrays,
+    edge_potential_buffer: CudaSlice<f32>,
+
     winding_chemical_potential_buffer: CudaSlice<f32>,
     rng_buffer: CudaSlice<f32>,
     cuda_rng: CudaRng,
     local_update_types: Option<Vec<(u16, bool)>>,
+    charge_update_types: Option<Vec<(u16, bool)>>,
     parallel_tempering_debug: Option<TemperingTracker>,
     wilson_loop_probs: Option<WilsonLoopData>,
     function_lookup: HashMap<String, CudaFunction>,
@@ -203,6 +213,10 @@ impl CudaBackend {
     pub fn new(
         bounds: SiteIndex,
         vn: Array2<f32>,
+
+        //added
+        edge_vn: Array2<f32>,
+
         dual_initial_state: Option<DualState>,
         seed: Option<u64>,
         device_id: Option<usize>,
@@ -247,7 +261,9 @@ impl CudaBackend {
             "plane_shift_update",
             "sum_int_buffer",
             "partial_count_plaquettes",
+            "partial_count_edges",
             "count_plaquette_pairs_with_increasing_z",
+            "charge_update"
         ];
         let function_lookup: HashMap<_, _> = functions
             .into_iter()
@@ -271,6 +287,9 @@ impl CudaBackend {
 
         let nreplicas = vn.shape()[0];
         let potential_size = vn.shape()[1];
+        //added
+        let edge_potential_size = edge_vn.shape()[1];
+        
         if nreplicas == 0 {
             return CudaError::value_error("Replica number must be larger than 0");
         }
@@ -294,6 +313,13 @@ impl CudaBackend {
         stream
             .memcpy_htod(vn.as_slice().unwrap(), &mut potential_buffer)
             .map_err(CudaError::from)?;
+        //added
+        let mut edge_potential_buffer = stream
+            .alloc_zeros::<f32>(edge_vn.len())
+            .map_err(CudaError::from)?;
+        stream
+            .memcpy_htod(edge_vn.as_slice().unwrap(), &mut edge_potential_buffer)
+            .map_err(CudaError::from)?;
 
         let mut winding_chemical_potential_buffer = stream
             .alloc_zeros::<f32>(nreplicas)
@@ -316,6 +342,15 @@ impl CudaBackend {
             .memcpy_htod(&vn_redirect, &mut potential_redirect_buffer)
             .map_err(CudaError::from)?;
 
+        //added
+        let edge_vn_redirect = (0..nreplicas as u32).collect::<Vec<_>>();
+        let mut edge_potential_redirect_buffer = stream
+            .alloc_zeros::<u32>(edge_vn_redirect.len())
+            .map_err(CudaError::from)?;
+        stream
+            .memcpy_htod(&edge_vn_redirect, &mut edge_potential_redirect_buffer)
+            .map_err(CudaError::from)?;
+
         // Set up the rng
         let local_updates = Self::calculate_simultaneous_local_updates(nreplicas, &bounds);
         let num_spanning_planes = Self::calculate_global_updates_planes(nreplicas, &bounds);
@@ -336,6 +371,10 @@ impl CudaBackend {
             .flat_map(|volume_type| [false, true].map(|offset| (volume_type, offset)))
             .collect();
 
+        let charge_update_types = (0..6)
+            .flat_map(|plaquette_type| [false, true].map(|offset| (plaquette_type, offset)))
+            .collect();
+
         Ok(Self {
             nreplicas,
             bounds,
@@ -345,10 +384,18 @@ impl CudaBackend {
             potential_redirect_buffer,
             potential_redirect_array: RedirectArrays::None,
             potential_buffer,
+
+            //added
+            edge_potential_size,
+            edge_potential_redirect_buffer,
+            edge_potential_redirect_array: RedirectArrays::None,
+            edge_potential_buffer,
+
             winding_chemical_potential_buffer,
             rng_buffer,
             cuda_rng,
             local_update_types: Some(local_update_types),
+            charge_update_types: Some(charge_update_types),
             parallel_tempering_debug: None,
             wilson_loop_probs: None,
             function_lookup,
@@ -1228,6 +1275,67 @@ impl CudaBackend {
         Ok(plaquettes)
     }
 
+    // still testing this out
+pub fn get_edge_counts(&mut self) -> Result<Array2<u32>, CudaError> {
+    let (t, x, _y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
+    let threads_to_sum = self.nreplicas * t * x; // each thread handles y*z*4 edges
+
+    let max_edge_sum = 6 * (self.potential_size - 1);
+    let hist_size = 2 * max_edge_sum + 1;
+
+    let mut sum_buffer = self
+        .stream
+        .alloc_zeros::<u32>(threads_to_sum * hist_size)
+        .map_err(CudaError::from)?;
+
+    // Initial partial counts: one histogram per (replica, t, x) thread
+    let mut builder = self.stream.launch_builder(
+        self.function_lookup
+            .get("partial_count_edges")
+            .unwrap(),
+    );
+    builder.arg(&mut self.state);
+    builder.arg(&mut sum_buffer);
+    builder.arg(&max_edge_sum);
+    builder.arg(&self.nreplicas);
+    builder.arg(&self.bounds.t);
+    builder.arg(&self.bounds.x);
+    builder.arg(&self.bounds.y);
+    builder.arg(&self.bounds.z);
+    unsafe {
+        builder
+            .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+            .map_err(CudaError::from)
+    }?;
+
+    // sum_buffer now has replicas * t * x blocks of size hist_size.
+    // Fold in the t*x dimension to get one histogram per replica.
+    let threads_to_sum = self.nreplicas * hist_size;
+    let num_steps = t * x;
+    let mut builder = self
+        .stream
+        .launch_builder(self.function_lookup.get("sum_int_buffer").unwrap());
+    builder.arg(&mut sum_buffer);
+    builder.arg(&threads_to_sum);
+    builder.arg(&num_steps);
+    unsafe {
+        builder
+            .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+            .map_err(CudaError::from)
+    }?;
+
+    let subslice = sum_buffer.slice(0..threads_to_sum);
+    let edges = self
+        .stream
+        .memcpy_dtov(&subslice)
+        .map(|v| {
+            Array2::from_shape_vec((self.nreplicas, hist_size), v).unwrap()
+        })
+        .map_err(CudaError::from)?;
+
+    Ok(edges)
+}
+
     pub fn get_action_per_replica(&mut self) -> Result<Array1<f32>, CudaError> {
         let (t, x, y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
         let mut threads_to_sum = self.nreplicas * t * x * y; // each thread starts with z*6
@@ -1353,6 +1461,67 @@ impl CudaBackend {
 
         #[cfg(debug_assertions)]
         debug_assert_eq!(self.get_edge_violations(), Ok(original_edge_violations));
+
+        Ok(())
+    }
+
+    pub fn run_charge_update_sweep(&mut self) -> Result<(), CudaError> {
+        // #[cfg(debug_assertions)]
+        // let original_edge_violations = self.get_edge_violations()?;
+
+        let mut rng = thread_rng();
+        let mut charge_update_types = self.charge_update_types.take().unwrap();
+        charge_update_types.shuffle(&mut rng);
+        let res = charge_update_types
+            .iter()
+            .copied()
+            .try_for_each(|(plaquette, offset)| self.run_charge_update(plaquette, offset));
+        self.charge_update_types = Some(charge_update_types);
+
+        // #[cfg(debug_assertions)]
+        // debug_assert_eq!(self.get_edge_violations(), Ok(original_edge_violations));
+
+        res
+    }
+
+    pub fn run_charge_update(
+        &mut self,
+        plaquette_type: u16,
+        offset: bool,
+    ) -> Result<(), CudaError> {
+        // #[cfg(debug_assertions)]
+        // let original_edge_violations = self.get_edge_violations()?;
+        // Get some rng
+        self.cuda_rng
+            .fill_with_uniform(&mut self.rng_buffer)
+            .map_err(CudaError::from)?;
+
+        let n = self.simultaneous_local_updates();
+        let mut builder = self.stream.launch_builder(
+            self.function_lookup
+                .get("charge_update")
+                .unwrap(),
+        );
+        builder.arg(&self.state);
+        builder.arg(&self.edge_potential_buffer);
+        builder.arg(&self.edge_potential_redirect_buffer);
+        builder.arg(&self.edge_potential_size);
+        builder.arg(&self.rng_buffer);
+        builder.arg(&plaquette_type);
+        builder.arg(&offset);
+        builder.arg(&self.nreplicas);
+        builder.arg(&self.bounds.t);
+        builder.arg(&self.bounds.x);
+        builder.arg(&self.bounds.y);
+        builder.arg(&self.bounds.z);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(n as u32))
+                .map_err(CudaError::from)
+        }?;
+
+        // #[cfg(debug_assertions)]
+        // debug_assert_eq!(self.get_edge_violations(), Ok(original_edge_violations));
 
         Ok(())
     }
@@ -2977,6 +3146,7 @@ mod tests {
 
         println!("{:?}", plaquette_counts);
 
-        Ok(())
+        // Ok(())
+        CudaError::value_error("this is a test")
     }
 }

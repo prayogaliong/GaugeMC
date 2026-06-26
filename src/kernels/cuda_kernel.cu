@@ -994,8 +994,6 @@ extern "C" __global__ void partial_count_plaquettes(int* plaquette_buffer, unsig
     }
 }
 
-
-
 extern "C" __global__ void count_plaquette_pairs_with_increasing_z(int* plaquette_buffer, unsigned int* plaquette_pair_counts, 
     int max_distance_from_root, int max_abs_integer_considered, int plaquette_type,
     int replicas, int t, int x, int y, int z)
@@ -1043,7 +1041,6 @@ extern "C" __global__ void count_plaquette_pairs_with_increasing_z(int* plaquett
     }
 }
 
-
 extern "C" __global__ void calculate_edge_sums(int* plaquette_buffer, int* edge_sums_buffer,
           int replicas, int t, int x, int y, int z)
 {
@@ -1089,6 +1086,53 @@ extern "C" __global__ void calculate_edge_sums(int* plaquette_buffer, int* edge_
     int edge_sum = get_edge_sum_from_plaquettes(plaquette_buffer, edge_type, coord_index, coords, bounds, coord_deltas);
 
     edge_sums_buffer[globalThreadNum] = edge_sum;
+}
+
+// still testing
+extern "C" __global__ void partial_count_edges(int* plaquette_buffer, unsigned int* sum_buffer,
+          int max_edge_sum, int replicas, int t, int x, int y, int z)
+{
+    // Each thread handles all edges at a fixed (replica, t, x), iterating over y, z, edge_type
+    int num_threads = replicas * t * x;
+
+    int globalThreadNum = get_thread_number();
+    if (globalThreadNum >= num_threads) {
+        return;
+    }
+
+    // Interleave replicas (0, 1, 2, 0, 1, 2, ...) matching partial_count_plaquettes convention
+    int replica_index = globalThreadNum % replicas;
+    int in_replica_index = globalThreadNum / replicas;
+    int t_index = in_replica_index / x;
+    int x_index = in_replica_index % x;
+
+    int coords_per_z = 1;
+    int coords_per_yz = z * coords_per_z;
+    int coords_per_xyz = y * coords_per_yz;
+    int coords_per_txyz = x * coords_per_xyz;
+    int coords_per_replica = t * coords_per_txyz;
+
+    int coords_delta[4] = {coords_per_txyz, coords_per_xyz, coords_per_yz, coords_per_z};
+    int bounds[4] = {t, x, y, z};
+
+    int hist_buff_size = 2 * max_edge_sum + 1;
+    int buff_offset = globalThreadNum * hist_buff_size;
+
+    for (int i = 0; i < y * z * 4; i++) {
+        int y_index = i / (z * 4);
+        int z_index = (i / 4) % z;
+        int edge_type = i % 4;
+
+        // coord_index must include the replica offset so that get_edge_sum_from_plaquettes
+        // correctly indexes into plaquette_buffer via coord_index * 6 + plaquette_type
+        int coord_index = replica_index * coords_per_replica + t_index * coords_per_txyz + x_index * coords_per_xyz + y_index * coords_per_yz + z_index;
+
+        int coords[4] = {t_index, x_index, y_index, z_index};
+
+        int edge_sum = get_edge_sum_from_plaquettes(plaquette_buffer, edge_type, coord_index, coords, bounds, coords_delta);
+
+        sum_buffer[buff_offset + edge_sum + max_edge_sum] += 1;
+    }
 }
 
 extern "C" __global__ void single_local_update_plaquettes(int* plaquette_buffer,
@@ -1201,5 +1245,150 @@ extern "C" __global__ void single_local_update_plaquettes(int* plaquette_buffer,
 
         plaquette_buffer[replica_offset + coord_index*6 + plaquette_type] = new_np;
         plaquette_buffer[replica_offset + coord_up_index*6 + plaquette_type] = new_np_up;
+    }
+}
+
+// For each plaquette type, get the ne value and look up potential.
+const int edges_for_plaquette[6][2] = {
+    {0, 1}, // tx plaquette (0) -> {t, x} or {0, 1}
+    {0, 2}, // ty
+    {0, 3}, // tz
+    {1, 2}, // xy
+    {1, 3}, // xz
+    {2, 3}  // yz
+};
+const int normal_dim_for_plaquette_edgeindex[6][2] = { //[plaquette_type][i]
+    {1, 0}, // tx plaquette (0) -> a difference between two plaquetes (t0, x0) and (t0+1, x0) is the value of an x edge
+    {2, 0}, // ty
+    {3, 0}, // tz
+    {2, 1}, // xy
+    {3, 1}, // xz
+    {3, 2}  // yz
+};
+
+extern "C" __global__ void charge_update(int* plaquette_buffer,
+          float* edge_potential_buffer, int* edge_potential_redirect, int edge_potential_vector_size,
+          float* rng_buffer,
+          unsigned short plaquette_type, bool offset,
+          int replicas, int t, int x, int y, int z)
+{
+    int globalThreadNum = get_thread_number();
+    if (globalThreadNum >= replicas * t * x * y * z / 2) {
+        return;
+    }
+
+    // First -- calculate the index of the plaquette we are focused on updating
+    int plaquettes_per_txyzslice = 1;
+    int plaquettes_per_txyslice = z * plaquettes_per_txyzslice / 2;
+    int plaquettes_per_txslice = y * plaquettes_per_txyslice;
+    int plaquettes_per_tslice = x * plaquettes_per_txslice;
+    int plaquettes_per_replica = t * plaquettes_per_tslice;
+
+    int replica_index = globalThreadNum / plaquettes_per_replica;
+    int within_replica_index = globalThreadNum % plaquettes_per_replica;
+
+    int t_index = within_replica_index / plaquettes_per_tslice;
+    int within_t_index = within_replica_index % plaquettes_per_tslice;
+
+    int x_index = within_t_index / plaquettes_per_txslice;
+    int within_x_index = within_t_index % plaquettes_per_txslice;
+
+    int y_index = within_x_index / plaquettes_per_txyslice;
+    int within_y_index = within_x_index % plaquettes_per_txyslice;
+
+    int soft_z_index = within_y_index / plaquettes_per_txyzslice;
+    int int_offset = (int) offset;
+    int z_index = 2*soft_z_index + (int_offset + t_index + x_index + y_index)%2;
+
+    int coords_per_z = 1;
+    int coords_per_yz = z * coords_per_z;
+    int coords_per_xyz = y * coords_per_yz;
+    int coords_per_txyz = x * coords_per_xyz;
+    int coords_per_replica = t * coords_per_txyz;
+    int coord_index = t_index * coords_per_txyz + x_index * coords_per_xyz + y_index * coords_per_yz + z_index;
+    // coord_index is index of coordinates (t,x,y,z).
+    // each coordinate has 4 cubes, 6 plaquettes, and 4 edges associated. 
+    int plaquette_replica_offset = replica_index * coords_per_replica * 6;
+    int edge_replica_offset = replica_index * coords_per_replica * 4;
+
+    int coords_delta[4] = {coords_per_txyz, coords_per_xyz, coords_per_yz, coords_per_z};
+    int coords[4] = {t_index, x_index, y_index, z_index};
+    int bounds[4] = {t, x, y, z};
+
+    // int plaquette_index = coord_index * 6 + plaquette_type;
+    // int edge_index = coord_index * 4 + edge_type;
+
+    const int MAX_DELTA = 1;
+    float boltzmann_weights[2*MAX_DELTA + 1];
+    for (int i = 0; i < 2*MAX_DELTA + 1; i++) {
+        boltzmann_weights[i] = 0.0;
+    }
+
+    int edge_potential_index = edge_potential_redirect[replica_index];
+    int edge_potential_offset = edge_potential_index * edge_potential_vector_size;
+    for (int i = 0; i<2; i++) {
+        int edge_type = edges_for_plaquette[plaquette_type][i];
+        int normal_dim = normal_dim_for_plaquette_edgeindex[plaquette_type][i];
+        int coord_up_index = calculate_index_up_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
+        int coord_down_index = calculate_index_down_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
+
+        int np = plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type];
+        int np_up = plaquette_buffer[plaquette_replica_offset + coord_up_index*6 + plaquette_type];
+        int np_down = plaquette_buffer[plaquette_replica_offset + coord_down_index*6 + plaquette_type];
+
+        int ne = np - np_down;
+        int ne_up = np_up - np;
+
+        for (int delta = -MAX_DELTA; delta <= MAX_DELTA; delta++) {
+            int new_ne = np + delta; // * sign_convention[cube_type][plaquette_type];
+            int new_ne_up = np_up - delta; // * sign_convention[cube_type][plaquette_type];
+            boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne)] : 1000.0;
+            boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_up) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_up)] : 1000.0;
+        }
+    }
+
+    // Convert potential to Boltzmann weights
+    float min_potential = boltzmann_weights[0];
+    for (int i = 1; i <2*MAX_DELTA+1; i++) {
+        min_potential = min(min_potential, boltzmann_weights[i]);
+    }
+    float total_weight = 0.0;
+    for (int i = 0; i < 2*MAX_DELTA+1; i++) {
+        float pot = boltzmann_weights[i] - min_potential;
+        boltzmann_weights[i] = pot < 100.0 ? exp(-pot) : 0.0;
+        total_weight += boltzmann_weights[i];
+    }
+
+    float rng = rng_buffer[globalThreadNum] * total_weight;
+    int j;
+    for (j = 0; j < 2*MAX_DELTA+1; j++) {
+        rng -= boltzmann_weights[j];
+        if (rng <= 0.0) {
+            break;
+        }
+    }
+
+    int delta = j-MAX_DELTA;
+
+    for (int i = 0; i<2; i++) {
+        int edge_type = edges_for_plaquette[plaquette_type][i];
+        int normal_dim = normal_dim_for_plaquette_edgeindex[plaquette_type][i];
+        int coord_up_index = calculate_index_up_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
+        int coord_down_index = calculate_index_down_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
+
+        int np = plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type];
+        int np_up = plaquette_buffer[plaquette_replica_offset + coord_up_index*6 + plaquette_type];
+        int np_down = plaquette_buffer[plaquette_replica_offset + coord_down_index*6 + plaquette_type];
+
+        int ne = np - np_down;
+        int ne_up = np_up - np;
+        int new_ne = ne + delta;
+        int new_ne_up = ne_up - delta;
+
+        // Update edges and plaquettes
+        plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type] = delta;
+
+        // edge_sums_buffer[edge_replica_offset + coord_index*4 + edge_type] = new_ne;
+        // edge_sums_buffer[edge_replica_offset + coord_up_index*4 + edge_type] = new_ne_up;
     }
 }
