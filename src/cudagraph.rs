@@ -371,7 +371,8 @@ impl CudaBackend {
             .flat_map(|volume_type| [false, true].map(|offset| (volume_type, offset)))
             .collect();
 
-        let charge_update_types = (0..6)
+        let charge_update_types = [0, 1, 3] // this is [0, 1, 3] since those correspond to tx, ty, and xy plaquettes
+            .into_iter()
             .flat_map(|plaquette_type| [false, true].map(|offset| (plaquette_type, offset)))
             .collect();
 
@@ -1275,66 +1276,65 @@ impl CudaBackend {
         Ok(plaquettes)
     }
 
-    // still testing this out
-pub fn get_edge_counts(&mut self) -> Result<Array2<u32>, CudaError> {
-    let (t, x, _y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
-    let threads_to_sum = self.nreplicas * t * x; // each thread handles y*z*4 edges
+    pub fn get_edge_counts(&mut self) -> Result<Array2<u32>, CudaError> {
+        let (t, x, _y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
+        let threads_to_sum = self.nreplicas * t * x; // each thread handles y*z*4 edges
 
-    let max_edge_sum = 6 * (self.potential_size - 1);
-    let hist_size = 2 * max_edge_sum + 1;
+        let max_edge_sum = 6 * (self.potential_size - 1);
+        let hist_size = 2 * max_edge_sum + 1;
 
-    let mut sum_buffer = self
-        .stream
-        .alloc_zeros::<u32>(threads_to_sum * hist_size)
-        .map_err(CudaError::from)?;
+        let mut sum_buffer = self
+            .stream
+            .alloc_zeros::<u32>(threads_to_sum * hist_size)
+            .map_err(CudaError::from)?;
 
-    // Initial partial counts: one histogram per (replica, t, x) thread
-    let mut builder = self.stream.launch_builder(
-        self.function_lookup
-            .get("partial_count_edges")
-            .unwrap(),
-    );
-    builder.arg(&mut self.state);
-    builder.arg(&mut sum_buffer);
-    builder.arg(&max_edge_sum);
-    builder.arg(&self.nreplicas);
-    builder.arg(&self.bounds.t);
-    builder.arg(&self.bounds.x);
-    builder.arg(&self.bounds.y);
-    builder.arg(&self.bounds.z);
-    unsafe {
-        builder
-            .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
-            .map_err(CudaError::from)
-    }?;
+        // Initial partial counts: one histogram per (replica, t, x) thread
+        let mut builder = self.stream.launch_builder(
+            self.function_lookup
+                .get("partial_count_edges")
+                .unwrap(),
+        );
+        builder.arg(&mut self.state);
+        builder.arg(&mut sum_buffer);
+        builder.arg(&max_edge_sum);
+        builder.arg(&self.nreplicas);
+        builder.arg(&self.bounds.t);
+        builder.arg(&self.bounds.x);
+        builder.arg(&self.bounds.y);
+        builder.arg(&self.bounds.z);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .map_err(CudaError::from)
+        }?;
 
-    // sum_buffer now has replicas * t * x blocks of size hist_size.
-    // Fold in the t*x dimension to get one histogram per replica.
-    let threads_to_sum = self.nreplicas * hist_size;
-    let num_steps = t * x;
-    let mut builder = self
-        .stream
-        .launch_builder(self.function_lookup.get("sum_int_buffer").unwrap());
-    builder.arg(&mut sum_buffer);
-    builder.arg(&threads_to_sum);
-    builder.arg(&num_steps);
-    unsafe {
-        builder
-            .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
-            .map_err(CudaError::from)
-    }?;
+        // sum_buffer now has replicas * t * x blocks of size hist_size.
+        // Fold in the t*x dimension to get one histogram per replica.
+        let threads_to_sum = self.nreplicas * hist_size;
+        let num_steps = t * x;
+        let mut builder = self
+            .stream
+            .launch_builder(self.function_lookup.get("sum_int_buffer").unwrap());
+        builder.arg(&mut sum_buffer);
+        builder.arg(&threads_to_sum);
+        builder.arg(&num_steps);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .map_err(CudaError::from)
+        }?;
 
-    let subslice = sum_buffer.slice(0..threads_to_sum);
-    let edges = self
-        .stream
-        .memcpy_dtov(&subslice)
-        .map(|v| {
-            Array2::from_shape_vec((self.nreplicas, hist_size), v).unwrap()
-        })
-        .map_err(CudaError::from)?;
+        let subslice = sum_buffer.slice(0..threads_to_sum);
+        let edges = self
+            .stream
+            .memcpy_dtov(&subslice)
+            .map(|v| {
+                Array2::from_shape_vec((self.nreplicas, hist_size), v).unwrap()
+            })
+            .map_err(CudaError::from)?;
 
-    Ok(edges)
-}
+        Ok(edges)
+    }
 
     pub fn get_action_per_replica(&mut self) -> Result<Array1<f32>, CudaError> {
         let (t, x, y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
@@ -1506,6 +1506,9 @@ pub fn get_edge_counts(&mut self) -> Result<Array2<u32>, CudaError> {
         builder.arg(&self.edge_potential_buffer);
         builder.arg(&self.edge_potential_redirect_buffer);
         builder.arg(&self.edge_potential_size);
+        builder.arg(&self.potential_buffer);
+        builder.arg(&self.potential_redirect_buffer);
+        builder.arg(&self.potential_size);
         builder.arg(&self.rng_buffer);
         builder.arg(&plaquette_type);
         builder.arg(&offset);
@@ -1524,6 +1527,26 @@ pub fn get_edge_counts(&mut self) -> Result<Array2<u32>, CudaError> {
         // debug_assert_eq!(self.get_edge_violations(), Ok(original_edge_violations));
 
         Ok(())
+    }
+
+    pub fn get_edge_counts_cpu(&mut self) -> Result<Array2<u32>, CudaError> {
+        let max_edge_sum = 6 * (self.potential_size - 1);
+        let hist_size = 2 * max_edge_sum + 1;
+
+        let edges = self.get_edge_violations()?;  // shape: [nreplicas, t, x, y, z, 4]
+
+        let mut hist = Array2::<u32>::zeros((self.nreplicas, hist_size));
+
+        hist.axis_iter_mut(Axis(0))
+            .zip(edges.axis_iter(Axis(0)))
+            .for_each(|(mut replica_hist, replica_edges)| {
+                for &val in replica_edges.iter() {
+                    let bin = (val + max_edge_sum as i32) as usize;
+                    replica_hist[bin] += 1;
+                }
+            });
+
+        Ok(hist)
     }
 
     pub fn run_single_matter_update_single(
@@ -3148,5 +3171,46 @@ mod tests {
 
         // Ok(())
         CudaError::value_error("this is a test")
+    }
+
+    #[test]
+    fn test_edge_counts_gpu_matches_cpu() {
+        let mut state =
+            Simulation::new(nreplicas = 3, t = 4, x = 4, y = 4, z = 4, potential_size = 3);
+
+        let gpu_hist = state.get_edge_counts()
+            .expect("GPU edge counts failed");
+        let cpu_hist = state.get_edge_counts_cpu()
+            .expect("CPU edge counts failed");
+
+        assert_eq!(
+            gpu_hist.shape(), cpu_hist.shape(),
+            "Histogram shapes differ: GPU={:?}, CPU={:?}",
+            gpu_hist.shape(), cpu_hist.shape()
+        );
+
+        // Check total edge count matches expected: nreplicas * t * x * y * z * 4
+        let (t, x, y, z) = (state.bounds.t, state.bounds.x, state.bounds.y, state.bounds.z);
+        let expected_total = (state.nreplicas * t * x * y * z * 4) as u32;
+        for r in 0..state.nreplicas {
+            let gpu_total: u32 = gpu_hist.row(r).sum();
+            let cpu_total: u32 = cpu_hist.row(r).sum();
+            assert_eq!(
+                gpu_total, expected_total,
+                "GPU replica {} total edge count {} != expected {}",
+                r, gpu_total, expected_total
+            );
+            assert_eq!(
+                cpu_total, expected_total,
+                "CPU replica {} total edge count {} != expected {}",
+                r, cpu_total, expected_total
+            );
+        }
+
+        assert_eq!(
+            gpu_hist, cpu_hist,
+            "GPU and CPU edge histograms differ!\nGPU: {:?}\nCPU: {:?}",
+            gpu_hist, cpu_hist
+        );
     }
 }

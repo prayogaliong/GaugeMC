@@ -1268,37 +1268,87 @@ const int normal_dim_for_plaquette_edgeindex[6][2] = { //[plaquette_type][i]
 
 extern "C" __global__ void charge_update(int* plaquette_buffer,
           float* edge_potential_buffer, int* edge_potential_redirect, int edge_potential_vector_size,
-          float* rng_buffer,
+          float* potential_buffer, int* potential_redirect, int potential_vector_size, float* rng_buffer,
           unsigned short plaquette_type, bool offset,
           int replicas, int t, int x, int y, int z)
 {
     int globalThreadNum = get_thread_number();
-    if (globalThreadNum >= replicas * t * x * y * z / 2) {
+    if (globalThreadNum >= replicas * t * x * y) {
         return;
     }
 
     // First -- calculate the index of the plaquette we are focused on updating
-    int plaquettes_per_txyzslice = 1;
-    int plaquettes_per_txyslice = z * plaquettes_per_txyzslice / 2;
-    int plaquettes_per_txslice = y * plaquettes_per_txyslice;
-    int plaquettes_per_tslice = x * plaquettes_per_txslice;
-    int plaquettes_per_replica = t * plaquettes_per_tslice;
+    int replica_index, t_index, x_index, y_index, z_index;
 
-    int replica_index = globalThreadNum / plaquettes_per_replica;
-    int within_replica_index = globalThreadNum % plaquettes_per_replica;
+    if (plaquette_type == 0) {
+        int plaquettes_per_txyzslice = 1;
+        int plaquettes_per_zslice   = 2 * plaquettes_per_txyzslice;       // z is binary: 0 or 1 (boundary selector)
+        int plaquettes_per_zyslice  = y * plaquettes_per_zslice;          // y is fully swept
+        int plaquettes_per_zyxslice = (x / 2) * plaquettes_per_zyslice;   // x is halved/checkerboarded
+        int plaquettes_per_replica  = t * plaquettes_per_zyxslice;        // t is fully swept
 
-    int t_index = within_replica_index / plaquettes_per_tslice;
-    int within_t_index = within_replica_index % plaquettes_per_tslice;
+        replica_index = globalThreadNum / plaquettes_per_replica;
+        int within_replica_index = globalThreadNum % plaquettes_per_replica;
 
-    int x_index = within_t_index / plaquettes_per_txslice;
-    int within_x_index = within_t_index % plaquettes_per_txslice;
+        t_index = within_replica_index / plaquettes_per_zyxslice;
+        int within_t_index = within_replica_index % plaquettes_per_zyxslice;
 
-    int y_index = within_x_index / plaquettes_per_txyslice;
-    int within_y_index = within_x_index % plaquettes_per_txyslice;
+        int soft_x_index = within_t_index / plaquettes_per_zyslice;
+        int within_x_index = within_t_index % plaquettes_per_zyslice;
 
-    int soft_z_index = within_y_index / plaquettes_per_txyzslice;
-    int int_offset = (int) offset;
-    int z_index = 2*soft_z_index + (int_offset + t_index + x_index + y_index)%2;
+        y_index = within_x_index / plaquettes_per_zslice;
+        int z_choice = within_x_index % plaquettes_per_zslice;   // 0 or 1
+
+        int int_offset = (int) offset;
+        x_index = 2*soft_x_index + (int_offset + t_index) % 2;   // parity depends ONLY on t + offset
+        z_index = (z - 1) * z_choice;
+    }
+    if (plaquette_type == 1) {
+        int plaquettes_per_txyzslice = 1;
+        int plaquettes_per_zslice   = 2 * plaquettes_per_txyzslice;       // z = 0 or z-1
+        int plaquettes_per_zxslice  = x * plaquettes_per_zslice;          // x fully swept
+        int plaquettes_per_zxyslice = (y / 2) * plaquettes_per_zxslice;   // y checkerboarded
+        int plaquettes_per_replica  = t * plaquettes_per_zxyslice;        // t fully swept
+
+        replica_index = globalThreadNum / plaquettes_per_replica;
+        int within_replica_index = globalThreadNum % plaquettes_per_replica;
+
+        t_index = within_replica_index / plaquettes_per_zxyslice;
+        int within_t_index = within_replica_index % plaquettes_per_zxyslice;
+
+        int soft_y_index = within_t_index / plaquettes_per_zxslice;
+        int within_y_index = within_t_index % plaquettes_per_zxslice;
+
+        x_index = within_y_index / plaquettes_per_zslice;
+        int z_choice = within_y_index % plaquettes_per_zslice;   // 0 or 1
+
+        int int_offset = (int) offset;
+        y_index = 2 * soft_y_index + (int_offset + t_index) % 2;
+        z_index = (z - 1) * z_choice;
+    }
+    if (plaquette_type == 3) {
+        int plaquettes_per_txyzslice = 1;
+        int plaquettes_per_zslice   = 2 * plaquettes_per_txyzslice;      // z is binary: 0 or 1 (boundary selector)
+        int plaquettes_per_txyslice = (y / 2) * plaquettes_per_zslice;   // y is halved/checkerboarded
+        int plaquettes_per_txslice  = x * plaquettes_per_txyslice;
+        int plaquettes_per_replica  = t * plaquettes_per_txslice;
+
+        replica_index = globalThreadNum / plaquettes_per_replica;
+        int within_replica_index = globalThreadNum % plaquettes_per_replica;
+
+        t_index = within_replica_index / plaquettes_per_txslice;
+        int within_t_index = within_replica_index % plaquettes_per_txslice;
+
+        x_index = within_t_index / plaquettes_per_txyslice;
+        int within_x_index = within_t_index % plaquettes_per_txyslice;
+
+        int soft_y_index = within_x_index / plaquettes_per_zslice;
+        int z_choice = within_x_index % plaquettes_per_zslice;   // 0 or 1
+
+        int int_offset = (int) offset;
+        y_index = 2*soft_y_index + (int_offset + t_index + x_index) % 2;
+        z_index = (z - 1) * z_choice;
+    }
 
     int coords_per_z = 1;
     int coords_per_yz = z * coords_per_z;
@@ -1314,37 +1364,44 @@ extern "C" __global__ void charge_update(int* plaquette_buffer,
     int coords_delta[4] = {coords_per_txyz, coords_per_xyz, coords_per_yz, coords_per_z};
     int coords[4] = {t_index, x_index, y_index, z_index};
     int bounds[4] = {t, x, y, z};
-
+    int coord_and_replica_index = replica_index*coords_per_replica + coords_delta[0]*coords[0] + coords_delta[1]*coords[1] + coords_delta[2]*coords[2] + coords_delta[3]*coords[3];
     // int plaquette_index = coord_index * 6 + plaquette_type;
     // int edge_index = coord_index * 4 + edge_type;
+
+    int edge_potential_index = edge_potential_redirect[replica_index];
+    int edge_potential_offset = edge_potential_index * edge_potential_vector_size;
+    int potential_index = potential_redirect[replica_index];
+    int potential_offset = potential_index * potential_vector_size;
+
+    int edge_charges[4] = {0,0,0,0};
+    get_edge_violations_around_plaquette(plaquette_buffer, plaquette_type, coord_and_replica_index, coords, bounds, coords_delta, edge_charges);
+    int ne_a = edge_charges[0];
+    int ne_a_up = edge_charges[1];
+    int ne_b = edge_charges[2];
+    int ne_b_up = edge_charges[3];
+    // this works for some reason. something weird with the sign convention. trust me on this.
 
     const int MAX_DELTA = 1;
     float boltzmann_weights[2*MAX_DELTA + 1];
     for (int i = 0; i < 2*MAX_DELTA + 1; i++) {
         boltzmann_weights[i] = 0.0;
     }
+    for (int delta = -MAX_DELTA; delta <= MAX_DELTA; delta++) {
+        // Boltzmann weight for edge potential
+        int new_ne_a    = ne_a    + delta;
+        int new_ne_b    = ne_b    + delta;
+        int new_ne_a_up = ne_a_up - delta;
+        int new_ne_b_up = ne_b_up - delta;
 
-    int edge_potential_index = edge_potential_redirect[replica_index];
-    int edge_potential_offset = edge_potential_index * edge_potential_vector_size;
-    for (int i = 0; i<2; i++) {
-        int edge_type = edges_for_plaquette[plaquette_type][i];
-        int normal_dim = normal_dim_for_plaquette_edgeindex[plaquette_type][i];
-        int coord_up_index = calculate_index_up_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
-        int coord_down_index = calculate_index_down_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
+        boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_a) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_a)] : 1000.0;
+        boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_a_up) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_a_up)] : 1000.0;
+        boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_b) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_b)] : 1000.0;
+        boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_b_up) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_b_up)] : 1000.0;
 
+        // Boltzmann weight for plaquette potential
         int np = plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type];
-        int np_up = plaquette_buffer[plaquette_replica_offset + coord_up_index*6 + plaquette_type];
-        int np_down = plaquette_buffer[plaquette_replica_offset + coord_down_index*6 + plaquette_type];
-
-        int ne = np - np_down;
-        int ne_up = np_up - np;
-
-        for (int delta = -MAX_DELTA; delta <= MAX_DELTA; delta++) {
-            int new_ne = np + delta; // * sign_convention[cube_type][plaquette_type];
-            int new_ne_up = np_up - delta; // * sign_convention[cube_type][plaquette_type];
-            boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne)] : 1000.0;
-            boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_up) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_up)] : 1000.0;
-        }
+        int new_np = np + delta;
+        boltzmann_weights[delta+MAX_DELTA] += (abs(new_np) < potential_vector_size) ? potential_buffer[potential_offset + abs(new_np)] : 1000.0;
     }
 
     // Convert potential to Boltzmann weights
@@ -1358,7 +1415,7 @@ extern "C" __global__ void charge_update(int* plaquette_buffer,
         boltzmann_weights[i] = pot < 100.0 ? exp(-pot) : 0.0;
         total_weight += boltzmann_weights[i];
     }
-
+    // now they are Boltzmann weights
     float rng = rng_buffer[globalThreadNum] * total_weight;
     int j;
     for (j = 0; j < 2*MAX_DELTA+1; j++) {
@@ -1367,28 +1424,12 @@ extern "C" __global__ void charge_update(int* plaquette_buffer,
             break;
         }
     }
-
     int delta = j-MAX_DELTA;
 
-    for (int i = 0; i<2; i++) {
-        int edge_type = edges_for_plaquette[plaquette_type][i];
-        int normal_dim = normal_dim_for_plaquette_edgeindex[plaquette_type][i];
-        int coord_up_index = calculate_index_up_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
-        int coord_down_index = calculate_index_down_difference(bounds[normal_dim], coords[normal_dim], coords_delta[normal_dim]) + coord_index;
+    // Update plaquette
+    plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type] += delta;
 
-        int np = plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type];
-        int np_up = plaquette_buffer[plaquette_replica_offset + coord_up_index*6 + plaquette_type];
-        int np_down = plaquette_buffer[plaquette_replica_offset + coord_down_index*6 + plaquette_type];
-
-        int ne = np - np_down;
-        int ne_up = np_up - np;
-        int new_ne = ne + delta;
-        int new_ne_up = ne_up - delta;
-
-        // Update edges and plaquettes
-        plaquette_buffer[plaquette_replica_offset + coord_index*6 + plaquette_type] = delta;
-
-        // edge_sums_buffer[edge_replica_offset + coord_index*4 + edge_type] = new_ne;
-        // edge_sums_buffer[edge_replica_offset + coord_up_index*4 + edge_type] = new_ne_up;
-    }
+    // Debug print statement
+    // printf("Thread number is %d, updating replica %d, (%d,%d,%d,%d), plaquette type %d\n", 
+    //     globalThreadNum, replica_index, t_index, x_index, y_index, z_index, plaquette_type);
 }
