@@ -1088,7 +1088,6 @@ extern "C" __global__ void calculate_edge_sums(int* plaquette_buffer, int* edge_
     edge_sums_buffer[globalThreadNum] = edge_sum;
 }
 
-// still testing
 extern "C" __global__ void partial_count_edges(int* plaquette_buffer, unsigned int* sum_buffer,
           int max_edge_sum, int replicas, int t, int x, int y, int z)
 {
@@ -1139,7 +1138,7 @@ extern "C" __global__ void single_local_update_plaquettes(int* plaquette_buffer,
           float* potential_buffer, int* potential_redirect, int potential_vector_size,
           float* rng_buffer,
           unsigned short cube_type, bool offset,
-          int replicas, int t, int x, int y, int z)
+          int replicas, int t, int x, int y, int z) //add bool to switch between open and closed boundary conditions
 {
     int globalThreadNum = get_thread_number();
 
@@ -1169,6 +1168,11 @@ extern "C" __global__ void single_local_update_plaquettes(int* plaquette_buffer,
     int soft_z_index = within_y_index / volumes_per_txyzslice;
     int int_offset = (int) offset;
     int z_index = 2*soft_z_index + (int_offset + t_index + x_index + y_index)%2;
+
+    // comment this block out to make z boundary periodic again
+    if (z_index == z-1 && cube_type != 0) {
+        return;
+    }
 
     int coords_per_z = 1;
     int coords_per_yz = z * coords_per_z;
@@ -1245,26 +1249,30 @@ extern "C" __global__ void single_local_update_plaquettes(int* plaquette_buffer,
 
         plaquette_buffer[replica_offset + coord_index*6 + plaquette_type] = new_np;
         plaquette_buffer[replica_offset + coord_up_index*6 + plaquette_type] = new_np_up;
+
+        // Debug print statement
+        // printf("Thread number is %d, updating replica %d, (%d,%d,%d,%d), cube type %d\n", 
+        // globalThreadNum, replica_index, t_index, x_index, y_index, z_index, cube_type);
     }
 }
 
-// For each plaquette type, get the ne value and look up potential.
-const int edges_for_plaquette[6][2] = {
-    {0, 1}, // tx plaquette (0) -> {t, x} or {0, 1}
-    {0, 2}, // ty
-    {0, 3}, // tz
-    {1, 2}, // xy
-    {1, 3}, // xz
-    {2, 3}  // yz
-};
-const int normal_dim_for_plaquette_edgeindex[6][2] = { //[plaquette_type][i]
-    {1, 0}, // tx plaquette (0) -> a difference between two plaquetes (t0, x0) and (t0+1, x0) is the value of an x edge
-    {2, 0}, // ty
-    {3, 0}, // tz
-    {2, 1}, // xy
-    {3, 1}, // xz
-    {3, 2}  // yz
-};
+// // For each plaquette type, get the ne value and look up potential.
+// const int edges_for_plaquette[6][2] = {
+//     {0, 1}, // tx plaquette (0) -> {t, x} or {0, 1}
+//     {0, 2}, // ty
+//     {0, 3}, // tz
+//     {1, 2}, // xy
+//     {1, 3}, // xz
+//     {2, 3}  // yz
+// };
+// const int normal_dim_for_plaquette_edgeindex[6][2] = { //[plaquette_type][i]
+//     {1, 0}, // tx plaquette (0) -> a difference between two plaquetes (t0, x0) and (t0+1, x0) is the value of an x edge
+//     {2, 0}, // ty
+//     {3, 0}, // tz
+//     {2, 1}, // xy
+//     {3, 1}, // xz
+//     {3, 2}  // yz
+// };
 
 extern "C" __global__ void charge_update(int* plaquette_buffer,
           float* edge_potential_buffer, int* edge_potential_redirect, int edge_potential_vector_size,
@@ -1376,10 +1384,10 @@ extern "C" __global__ void charge_update(int* plaquette_buffer,
     int edge_charges[4] = {0,0,0,0};
     get_edge_violations_around_plaquette(plaquette_buffer, plaquette_type, coord_and_replica_index, coords, bounds, coords_delta, edge_charges);
     int ne_a = edge_charges[0];
-    int ne_a_up = edge_charges[1];
-    int ne_b = edge_charges[2];
-    int ne_b_up = edge_charges[3];
-    // this works for some reason. something weird with the sign convention. trust me on this.
+    int ne_b = edge_charges[1];
+    int ne_a_up = edge_charges[3];
+    int ne_b_up = edge_charges[2];
+    // looks a little weird but this is how get_edge_violations_around_plaquette was written
 
     const int MAX_DELTA = 1;
     float boltzmann_weights[2*MAX_DELTA + 1];
@@ -1389,9 +1397,14 @@ extern "C" __global__ void charge_update(int* plaquette_buffer,
     for (int delta = -MAX_DELTA; delta <= MAX_DELTA; delta++) {
         // Boltzmann weight for edge potential
         int new_ne_a    = ne_a    + delta;
-        int new_ne_b    = ne_b    + delta;
+        int new_ne_b    = ne_b    - delta;
         int new_ne_a_up = ne_a_up - delta;
-        int new_ne_b_up = ne_b_up - delta;
+        int new_ne_b_up = ne_b_up + delta;
+        // this is the sign convention because of 
+        // if (edge_type > other_edge) {
+        //         sign = -1;
+        //     }
+        // in get_edge_sum_from_plaquettes
 
         boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_a) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_a)] : 1000.0;
         boltzmann_weights[delta+MAX_DELTA] += (abs(new_ne_a_up) < edge_potential_vector_size) ? edge_potential_buffer[edge_potential_offset + abs(new_ne_a_up)] : 1000.0;

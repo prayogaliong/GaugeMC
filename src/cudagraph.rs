@@ -1837,7 +1837,8 @@ mod tests {
     fn test_construction() -> Result<(), CudaError> {
         let _state = CudaBackend::new(
             SiteIndex::new(6, 8, 10, 12),
-            make_simple_potentials(4, 32),
+            make_simple_potentials(4, 32), // plaquette potential
+            make_simple_potentials(4, 32), // edge potential
             None,
             Some(31415),
             None,
@@ -1850,7 +1851,8 @@ mod tests {
     fn test_simple_launch() -> Result<(), CudaError> {
         let mut state = CudaBackend::new(
             SiteIndex::new(4, 4, 4, 4),
-            make_simple_potentials(1, 2),
+            make_simple_potentials(1, 2), // plaquette potential
+            make_simple_potentials(1, 2), // edge potential
             None,
             Some(31415),
             None,
@@ -1863,6 +1865,9 @@ mod tests {
     fn test_repeated_launch() -> Result<(), CudaError> {
         let mut state = CudaBackend::new(
             SiteIndex::new(8, 8, 8, 8),
+            make_custom_simple_potentials(6, 32, |r, n| {
+                0.25 * (r as f32 + 1.0) * (n.pow(2) as f32)
+            }),
             make_custom_simple_potentials(6, 32, |r, n| {
                 0.25 * (r as f32 + 1.0) * (n.pow(2) as f32)
             }),
@@ -1884,6 +1889,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(4, 4, 4, 4),
             make_simple_potentials(1, 2),
+            make_simple_potentials(1, 2),
             None,
             Some(31415),
             None,
@@ -1901,6 +1907,7 @@ mod tests {
         state[[0, 0, 0, 0, 0, 0]] = 1;
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 2),
             make_simple_potentials(r, 2),
             Some(DualState::new_volumes(state)),
             Some(31415),
@@ -1924,6 +1931,7 @@ mod tests {
         let state = DualState::new_volumes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 2),
             make_simple_potentials(r, 2),
             Some(state),
             Some(31415),
@@ -1950,6 +1958,7 @@ mod tests {
             let mut state = CudaBackend::new(
                 SiteIndex::new(t, x, y, z),
                 make_simple_potentials(r, 2),
+                make_simple_potentials(r, 2),
                 Some(state),
                 None,
                 None,
@@ -1972,6 +1981,7 @@ mod tests {
             let state = DualState::new_volumes(state);
             let mut state = CudaBackend::new(
                 SiteIndex::new(t, x, y, z),
+                make_simple_potentials(r, 2),
                 make_simple_potentials(r, 2),
                 Some(state),
                 None,
@@ -1996,6 +2006,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
             None,
@@ -2016,6 +2027,7 @@ mod tests {
         plaquette_state[[0, 1, 0, 0, 0, 0]] = 1;
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
@@ -2038,6 +2050,7 @@ mod tests {
         plaquette_state[[0, 0, 0, 0, 0, 3]] = 1; // xy
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
@@ -2068,6 +2081,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
             None,
@@ -2096,6 +2110,7 @@ mod tests {
 
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
@@ -2126,6 +2141,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
             None,
@@ -2154,6 +2170,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
             None,
@@ -2174,6 +2191,7 @@ mod tests {
         let state = DualState::new_volumes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
@@ -2196,6 +2214,7 @@ mod tests {
         let state = DualState::new_volumes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
@@ -2223,6 +2242,7 @@ mod tests {
         let (t, x, y, z) = (8, 8, 8, 8);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(nreplicas, 32),
             make_simple_potentials(nreplicas, 32),
             Some(DualState::new_volumes(Array::zeros((
                 nreplicas, t, x, y, z, 4,
@@ -2257,6 +2277,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(nreplicas, 32),
+            make_simple_potentials(nreplicas, 32),
             Some(DualState::new_plaquettes(Array6::zeros((
                 nreplicas, t, x, y, z, 6,
             )))),
@@ -2289,6 +2310,7 @@ mod tests {
         let (t, x, y, z) = (8, 8, 8, 8);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(nreplicas, 32),
             make_simple_potentials(nreplicas, 32),
             Some(DualState::new_plaquettes(Array6::zeros((
                 nreplicas, t, x, y, z, 6,
@@ -2334,6 +2356,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_custom_simple_potentials(r, 32, |r, np| ((r + 1) * np.pow(2)) as f32),
+            make_custom_simple_potentials(r, 32, |r, np| ((r + 1) * np.pow(2)) as f32),
             Some(DualState::new_plaquettes(plaquette_state)),
             Some(31415),
             None,
@@ -2354,6 +2377,7 @@ mod tests {
         let (r, d) = (3, 4);
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
+            make_custom_simple_potentials(r, 32, |r, n| (r * n.pow(2)) as f32),
             make_custom_simple_potentials(r, 32, |r, n| (r * n.pow(2)) as f32),
             None,
             Some(31415),
@@ -2425,6 +2449,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_custom_simple_potentials(r, 32, |_, n| n as f32 * 10.0),
+            make_custom_simple_potentials(r, 32, |_, n| n as f32 * 10.0),
             Some(state),
             Some(31415),
             None,
@@ -2464,6 +2489,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
             None,
@@ -2485,6 +2511,7 @@ mod tests {
         let state = DualState::new_volumes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
@@ -2522,6 +2549,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
             None,
@@ -2551,6 +2579,7 @@ mod tests {
         let state = DualState::new_volumes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_custom_simple_potentials(r, 32, |r, n| ((r + 1) * n) as f32),
             make_custom_simple_potentials(r, 32, |r, n| ((r + 1) * n) as f32),
             Some(state),
             Some(31415),
@@ -2594,6 +2623,7 @@ mod tests {
         // Make a potential which prefers big ns in the first replica.
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_custom_simple_potentials(r, 32, |r, n| ((r + 1) * n) as f32),
             make_custom_simple_potentials(r, 32, |r, n| ((r + 1) * n) as f32),
             Some(state),
             Some(31415),
@@ -2663,6 +2693,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_custom_simple_potentials(r, 4, |_, _| 0.0),
+            make_custom_simple_potentials(r, 4, |_, _| 0.0),
             Some(state),
             Some(31415),
             None,
@@ -2711,6 +2742,7 @@ mod tests {
         let state = DualState::new_plaquettes(initial_state.clone());
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
+            make_custom_simple_potentials(r, 4, |_, _| 0.0),
             make_custom_simple_potentials(r, 4, |_, _| 0.0),
             Some(state),
             Some(31415),
@@ -2761,6 +2793,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_custom_simple_potentials(r, 4, |_, _| 0.0),
+            make_custom_simple_potentials(r, 4, |_, _| 0.0),
             Some(state),
             Some(31415),
             None,
@@ -2791,6 +2824,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
             None,
@@ -2814,6 +2848,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
             None,
@@ -2834,6 +2869,7 @@ mod tests {
         let (r, t, x, y, z) = (4, 8, 8, 8, 8);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             None,
             Some(31415),
@@ -2858,6 +2894,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             None,
             Some(31415),
             None,
@@ -2880,6 +2917,7 @@ mod tests {
         let (r, t, x, y, z) = (16, 32, 32, 32, 32);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             None,
             Some(31415),
@@ -2907,6 +2945,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             None,
             Some(31415),
             None,
@@ -2932,6 +2971,7 @@ mod tests {
         let (r, t, x, y, z) = (17, 4, 4, 4, 4);
         let mut state = CudaBackend::new(
             SiteIndex::new(t, x, y, z),
+            make_simple_potentials(r, 32),
             make_simple_potentials(r, 32),
             None,
             Some(31415),
@@ -2975,6 +3015,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
             None,
@@ -3014,6 +3055,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_simple_potentials(r, 32),
+            make_simple_potentials(r, 32),
             Some(state),
             Some(31415),
             None,
@@ -3046,6 +3088,7 @@ mod tests {
         let state = DualState::new_volumes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
+            make_simple_potentials(r, 3),
             make_simple_potentials(r, 3),
             Some(state),
             Some(31415),
@@ -3094,6 +3137,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_simple_potentials(r, 3),
+            make_simple_potentials(r, 3),
             Some(state),
             Some(31415),
             None,
@@ -3124,6 +3168,7 @@ mod tests {
         let state = DualState::new_plaquettes(state);
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
+            make_simple_potentials(r, 3),
             make_simple_potentials(r, 3),
             Some(state),
             Some(31415),
@@ -3157,6 +3202,7 @@ mod tests {
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
             make_simple_potentials(r, 3),
+            make_simple_potentials(r, 3),
             Some(state),
             None,
             None,
@@ -3175,8 +3221,26 @@ mod tests {
 
     #[test]
     fn test_edge_counts_gpu_matches_cpu() {
-        let mut state =
-            Simulation::new(nreplicas = 3, t = 4, x = 4, y = 4, z = 4, potential_size = 3);
+        let (r, d) = (1, 4);
+
+        let mut state = Array6::zeros((r, d, d, d, d, 6));
+        state
+            .axis_iter_mut(Axis(0))
+            .enumerate()
+            .for_each(|(rr, mut x)| {
+                x[(0, 0, 0, 0, 0)] = 0;
+                x[(0, 0, 0, 1, 0)] = 1;
+            });
+        let state = DualState::new_plaquettes(state);
+        let mut state = CudaBackend::new(
+            SiteIndex::new(d, d, d, d),
+            make_simple_potentials(r, 3),
+            make_simple_potentials(r, 3),
+            Some(state),
+            None,
+            None,
+            None,
+        )?;
 
         let gpu_hist = state.get_edge_counts()
             .expect("GPU edge counts failed");
