@@ -1088,6 +1088,52 @@ extern "C" __global__ void calculate_edge_sums(int* plaquette_buffer, int* edge_
     edge_sums_buffer[globalThreadNum] = edge_sum;
 }
 
+extern "C" __global__ void calculate_edge_sums_boundary(int* plaquette_buffer, int* edge_sums_buffer_boundary,
+          int replicas, int t, int x, int y, int z)
+{
+    // Only 3 edge types here: t, x, y. z_index is fixed at 0.
+    int edge_types = 3;
+    int edges_per_txslice = y * edge_types;
+    int edges_per_tslice = x * edges_per_txslice;
+    int edges_per_replica = t * edges_per_tslice;
+
+    int globalThreadNum = get_thread_number();
+    if (globalThreadNum >= replicas * edges_per_replica) {
+        return;
+    }
+
+    int replica_index = globalThreadNum / edges_per_replica;
+    int within_replica_index = globalThreadNum % edges_per_replica;
+
+    int t_index = within_replica_index / edges_per_tslice;
+    int within_t_index = within_replica_index % edges_per_tslice;
+
+    int x_index = within_t_index / edges_per_txslice;
+    int within_x_index = within_t_index % edges_per_txslice;
+
+    int y_index = within_x_index / edge_types;
+    int edge_type = within_x_index % edge_types;
+
+    int z_index = 0;
+
+    int coords_per_z = 1;
+    int coords_per_y = z * coords_per_z;
+    int coords_per_x = y * coords_per_y;
+    int coords_per_t = x * coords_per_x;
+    int coords_per_replica = t * coords_per_t;
+    int replica_offset = replica_index * coords_per_replica;
+
+    int coord_index = replica_offset + t_index * coords_per_t + x_index * coords_per_x + y_index * coords_per_y + z_index * coords_per_z;
+
+    int coords[4] = {t_index, x_index, y_index, z_index};
+    int bounds[4] = {t, x, y, z};
+    int coord_deltas[4] = {coords_per_t, coords_per_x, coords_per_y, coords_per_z};
+
+    int edge_sum = get_edge_sum_from_plaquettes(plaquette_buffer, edge_type, coord_index, coords, bounds, coord_deltas);
+
+    edge_sums_buffer_boundary[globalThreadNum] = edge_sum;
+}
+
 extern "C" __global__ void partial_count_edges(int* plaquette_buffer, unsigned int* sum_buffer,
           int max_edge_sum, int replicas, int t, int x, int y, int z)
 {
@@ -1373,8 +1419,6 @@ extern "C" __global__ void charge_update(int* plaquette_buffer,
     int coords[4] = {t_index, x_index, y_index, z_index};
     int bounds[4] = {t, x, y, z};
     int coord_and_replica_index = replica_index*coords_per_replica + coords_delta[0]*coords[0] + coords_delta[1]*coords[1] + coords_delta[2]*coords[2] + coords_delta[3]*coords[3];
-    // int plaquette_index = coord_index * 6 + plaquette_type;
-    // int edge_index = coord_index * 4 + edge_type;
 
     int edge_potential_index = edge_potential_redirect[replica_index];
     int edge_potential_offset = edge_potential_index * edge_potential_vector_size;

@@ -263,7 +263,8 @@ impl CudaBackend {
             "partial_count_plaquettes",
             "partial_count_edges",
             "count_plaquette_pairs_with_increasing_z",
-            "charge_update"
+            "charge_update",
+            "calculate_edge_sums_boundary"
         ];
         let function_lookup: HashMap<_, _> = functions
             .into_iter()
@@ -880,6 +881,140 @@ impl CudaBackend {
 
         Ok(edges)
     }
+
+    pub fn get_edge_violations_boundary(&mut self) -> Result<Array5<i32>, CudaError> {
+        let (t, x, y, z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
+
+        // Only t, x, y edges (3 types), only the z=0 slice (1 layer)
+        let num_edges = self.nreplicas * t * x * y * 3;
+        let mut edge_buffer_boundary = self
+            .stream
+            .alloc_zeros::<i32>(num_edges)
+            .map_err(CudaError::from)?;
+        Self::calculate_edge_violations_static(
+            self.stream.clone(),
+            self.function_lookup.get("calculate_edge_sums_boundary").unwrap(),
+            &mut edge_buffer_boundary,
+            &self.state,
+            self.bounds.clone(),
+            self.nreplicas,
+        )?;
+
+        let output = self
+            .stream
+            .memcpy_dtov(&edge_buffer_boundary)
+            .map_err(CudaError::from)?;
+
+        let mut edges = Array5::from_shape_vec((self.nreplicas, t, x, y, 3), output).unwrap();
+
+        if let Some(redirect) = self.potential_redirect_array.get_redirect() {
+            let edges_clone = edges.clone();
+            edges_clone
+                .axis_iter(Axis(0))
+                .enumerate()
+                .for_each(|(ir, x)| {
+                    edges
+                        .index_axis_mut(Axis(0), redirect[ir] as usize)
+                        .iter_mut()
+                        .zip(x)
+                        .for_each(|(x, y)| {
+                            *x = *y;
+                        });
+                });
+        }
+
+        Ok(edges)
+    }
+
+    pub fn get_edge_correlation_matrix(
+    &mut self,
+) -> Result<Vec<Vec<(Array1<f64>, Array1<f64>, Array1<f64>)>>, CudaError> {
+    let edges = self.get_edge_violations_boundary()?; // shape (nreplicas, t, x, y, 3)
+    let (nrep, t, x, y, _) = edges.dim();
+    let norm = (nrep * t * x * y) as f64;
+
+    let half_t = t / 2 + 1;
+    let half_x = x / 2 + 1;
+    let half_y = y / 2 + 1;
+
+    let mut matrix: Vec<Vec<(Array1<f64>, Array1<f64>, Array1<f64>)>> = (0..3)
+        .map(|_| {
+            (0..3)
+                .map(|_| {
+                    (
+                        Array1::<f64>::zeros(half_t),
+                        Array1::<f64>::zeros(half_x),
+                        Array1::<f64>::zeros(half_y),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+
+    for ir in 0..nrep {
+        for ti in 0..t {
+            for xi in 0..x {
+                for yi in 0..y {
+                    let e0 = [
+                        edges[[ir, ti, xi, yi, 0]] as i64,
+                        edges[[ir, ti, xi, yi, 1]] as i64,
+                        edges[[ir, ti, xi, yi, 2]] as i64,
+                    ];
+
+                    for r in 0..half_t {
+                        let tj = (ti + r) % t;
+                        let e1 = [
+                            edges[[ir, tj, xi, yi, 0]] as i64,
+                            edges[[ir, tj, xi, yi, 1]] as i64,
+                            edges[[ir, tj, xi, yi, 2]] as i64,
+                        ];
+                        for a in 0..3 {
+                            for b in 0..3 {
+                                matrix[a][b].0[r] += (e0[a] * e1[b]) as f64;
+                            }
+                        }
+                    }
+                    for r in 0..half_x {
+                        let xj = (xi + r) % x;
+                        let e1 = [
+                            edges[[ir, ti, xj, yi, 0]] as i64,
+                            edges[[ir, ti, xj, yi, 1]] as i64,
+                            edges[[ir, ti, xj, yi, 2]] as i64,
+                        ];
+                        for a in 0..3 {
+                            for b in 0..3 {
+                                matrix[a][b].1[r] += (e0[a] * e1[b]) as f64;
+                            }
+                        }
+                    }
+                    for r in 0..half_y {
+                        let yj = (yi + r) % y;
+                        let e1 = [
+                            edges[[ir, ti, xi, yj, 0]] as i64,
+                            edges[[ir, ti, xi, yj, 1]] as i64,
+                            edges[[ir, ti, xi, yj, 2]] as i64,
+                        ];
+                        for a in 0..3 {
+                            for b in 0..3 {
+                                matrix[a][b].2[r] += (e0[a] * e1[b]) as f64;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for a in 0..3 {
+        for b in 0..3 {
+            matrix[a][b].0 /= norm;
+            matrix[a][b].1 /= norm;
+            matrix[a][b].2 /= norm;
+        }
+    }
+
+    Ok(matrix)
+}
 
     pub fn get_matter_flow_per_coordinate(&mut self) -> Result<Array5<i32>, CudaError> {
         let (t, x, y, z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
