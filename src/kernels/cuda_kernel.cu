@@ -1089,9 +1089,9 @@ extern "C" __global__ void calculate_edge_sums(int* plaquette_buffer, int* edge_
 }
 
 extern "C" __global__ void calculate_edge_sums_boundary(int* plaquette_buffer, int* edge_sums_buffer_boundary,
-          int replicas, int t, int x, int y, int z)
+          int replicas, int t, int x, int y, int z, bool boundary_selector)
 {
-    // Only 3 edge types here: t, x, y. z_index is fixed at 0.
+    // Only 3 edge types here: t, x, y. z_index is fixed at 0 or z-1.
     int edge_types = 3;
     int edges_per_txslice = y * edge_types;
     int edges_per_tslice = x * edges_per_txslice;
@@ -1114,7 +1114,7 @@ extern "C" __global__ void calculate_edge_sums_boundary(int* plaquette_buffer, i
     int y_index = within_x_index / edge_types;
     int edge_type = within_x_index % edge_types;
 
-    int z_index = 0;
+    int z_index = (z-1) * boundary_selector; // Either near or far boundary
 
     int coords_per_z = 1;
     int coords_per_y = z * coords_per_z;
@@ -1170,6 +1170,100 @@ extern "C" __global__ void partial_count_edges(int* plaquette_buffer, unsigned i
 
         // coord_index must include the replica offset so that get_edge_sum_from_plaquettes
         // correctly indexes into plaquette_buffer via coord_index * 6 + plaquette_type
+        int coord_index = replica_index * coords_per_replica + t_index * coords_per_txyz + x_index * coords_per_xyz + y_index * coords_per_yz + z_index;
+
+        int coords[4] = {t_index, x_index, y_index, z_index};
+
+        int edge_sum = get_edge_sum_from_plaquettes(plaquette_buffer, edge_type, coord_index, coords, bounds, coords_delta);
+
+        sum_buffer[buff_offset + edge_sum + max_edge_sum] += 1;
+    }
+}
+
+// extern "C" __global__ void partial_count_edges_boundary(int* plaquette_buffer, unsigned int* sum_buffer,
+//           int max_edge_sum, int replicas, int t, int x, int y, int z)
+// {
+//     // Each thread handles all boundary edges at a fixed (replica, t, x),
+//     // iterating over y, boundary (0=near z=0, 1=far z=z-1), edge_type.
+//     // Bulk z-slices are skipped since those edge sums are always 0.
+//     int num_threads = replicas * t * x;
+
+//     int globalThreadNum = get_thread_number();
+//     if (globalThreadNum >= num_threads) {
+//         return;
+//     }
+
+//     int replica_index = globalThreadNum % replicas;
+//     int in_replica_index = globalThreadNum / replicas;
+//     int t_index = in_replica_index / x;
+//     int x_index = in_replica_index % x;
+
+//     int coords_per_z = 1;
+//     int coords_per_yz = z * coords_per_z;
+//     int coords_per_xyz = y * coords_per_yz;
+//     int coords_per_txyz = x * coords_per_xyz;
+//     int coords_per_replica = t * coords_per_txyz;
+
+//     int coords_delta[4] = {coords_per_txyz, coords_per_xyz, coords_per_yz, coords_per_z};
+//     int bounds[4] = {t, x, y, z};
+
+//     int hist_buff_size = 2 * max_edge_sum + 1;
+//     int buff_offset = globalThreadNum * hist_buff_size;
+
+//     const int num_boundaries = 2;
+//     for (int i = 0; i < y * num_boundaries * 4; i++) {
+//         int y_index = i / (num_boundaries * 4);
+//         int boundary = (i / 4) % num_boundaries;
+//         int edge_type = i % 4;
+
+//         int z_index = (boundary == 0) ? 0 : (z - 1);
+
+//         int coord_index = replica_index * coords_per_replica + t_index * coords_per_txyz + x_index * coords_per_xyz + y_index * coords_per_yz + z_index;
+
+//         int coords[4] = {t_index, x_index, y_index, z_index};
+
+//         int edge_sum = get_edge_sum_from_plaquettes(plaquette_buffer, edge_type, coord_index, coords, bounds, coords_delta);
+
+//         sum_buffer[buff_offset + edge_sum + max_edge_sum] += 1;
+//     }
+// }
+
+extern "C" __global__ void partial_count_edges_boundary(int* plaquette_buffer, unsigned int* sum_buffer,
+          int max_edge_sum, int replicas, int t, int x, int y, int z)
+{
+    int num_threads = replicas * t * x;
+
+    int globalThreadNum = get_thread_number();
+    if (globalThreadNum >= num_threads) {
+        return;
+    }
+
+    int replica_index = globalThreadNum % replicas;
+    int in_replica_index = globalThreadNum / replicas;
+    int t_index = in_replica_index / x;
+    int x_index = in_replica_index % x;
+
+    int coords_per_z = 1;
+    int coords_per_yz = z * coords_per_z;
+    int coords_per_xyz = y * coords_per_yz;
+    int coords_per_txyz = x * coords_per_xyz;
+    int coords_per_replica = t * coords_per_txyz;
+
+    int coords_delta[4] = {coords_per_txyz, coords_per_xyz, coords_per_yz, coords_per_z};
+    int bounds[4] = {t, x, y, z};
+
+    int hist_buff_size = 2 * max_edge_sum + 1;
+    int buff_offset = globalThreadNum * hist_buff_size;
+
+    const int num_boundaries = 2;
+    const int edge_types = 3;  // only t, x, y edges -- matches calculate_edge_sums_boundary
+    for (int i = 0; i < y * num_boundaries * edge_types; i++) {
+        int y_index = i / (num_boundaries * edge_types);
+        int boundary = (i / edge_types) % num_boundaries;
+        int edge_type = i % edge_types;
+
+        int z_index = (boundary == 0) ? 0 : (z - 1);
+
         int coord_index = replica_index * coords_per_replica + t_index * coords_per_txyz + x_index * coords_per_xyz + y_index * coords_per_yz + z_index;
 
         int coords[4] = {t_index, x_index, y_index, z_index};
@@ -1301,24 +1395,6 @@ extern "C" __global__ void single_local_update_plaquettes(int* plaquette_buffer,
         // globalThreadNum, replica_index, t_index, x_index, y_index, z_index, cube_type);
     }
 }
-
-// // For each plaquette type, get the ne value and look up potential.
-// const int edges_for_plaquette[6][2] = {
-//     {0, 1}, // tx plaquette (0) -> {t, x} or {0, 1}
-//     {0, 2}, // ty
-//     {0, 3}, // tz
-//     {1, 2}, // xy
-//     {1, 3}, // xz
-//     {2, 3}  // yz
-// };
-// const int normal_dim_for_plaquette_edgeindex[6][2] = { //[plaquette_type][i]
-//     {1, 0}, // tx plaquette (0) -> a difference between two plaquetes (t0, x0) and (t0+1, x0) is the value of an x edge
-//     {2, 0}, // ty
-//     {3, 0}, // tz
-//     {2, 1}, // xy
-//     {3, 1}, // xz
-//     {3, 2}  // yz
-// };
 
 extern "C" __global__ void charge_update(int* plaquette_buffer,
           float* edge_potential_buffer, int* edge_potential_redirect, int edge_potential_vector_size,

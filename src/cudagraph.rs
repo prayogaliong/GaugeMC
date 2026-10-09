@@ -216,6 +216,7 @@ impl CudaBackend {
 
         //added
         edge_vn: Array2<f32>,
+        use_worm_defects: bool,
 
         dual_initial_state: Option<DualState>,
         seed: Option<u64>,
@@ -264,7 +265,8 @@ impl CudaBackend {
             "partial_count_edges",
             "count_plaquette_pairs_with_increasing_z",
             "charge_update",
-            "calculate_edge_sums_boundary"
+            "calculate_edge_sums_boundary",
+            "partial_count_edges_boundary",
         ];
         let function_lookup: HashMap<_, _> = functions
             .into_iter()
@@ -841,6 +843,7 @@ impl CudaBackend {
 
     pub fn get_edge_violations(&mut self) -> Result<Array6<i32>, CudaError> {
         let (t, x, y, z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
+        let boundary_selector = false;
 
         let num_edges = self.nreplicas * t * x * y * z * 4;
         let mut edge_buffer = self
@@ -854,6 +857,7 @@ impl CudaBackend {
             &self.state,
             self.bounds.clone(),
             self.nreplicas,
+            None,
         )?;
 
         let output = self
@@ -882,7 +886,7 @@ impl CudaBackend {
         Ok(edges)
     }
 
-    pub fn get_edge_violations_boundary(&mut self) -> Result<Array5<i32>, CudaError> {
+    pub fn get_edge_violations_boundary(&mut self, boundary_selector: bool) -> Result<Array5<i32>, CudaError> {
         let (t, x, y, z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
 
         // Only t, x, y edges (3 types), only the z=0 slice (1 layer)
@@ -898,6 +902,7 @@ impl CudaBackend {
             &self.state,
             self.bounds.clone(),
             self.nreplicas,
+            Some(boundary_selector)
         )?;
 
         let output = self
@@ -929,7 +934,7 @@ impl CudaBackend {
     pub fn get_edge_correlation_matrix(
     &mut self,
 ) -> Result<Vec<Vec<(Array1<f64>, Array1<f64>, Array1<f64>)>>, CudaError> {
-    let edges = self.get_edge_violations_boundary()?; // shape (nreplicas, t, x, y, 3)
+    let edges = self.get_edge_violations_boundary(false)?; // shape (nreplicas, t, x, y, 3)
     let (nrep, t, x, y, _) = edges.dim();
     let norm = (nrep * t * x * y) as f64;
 
@@ -1415,7 +1420,7 @@ impl CudaBackend {
         let (t, x, _y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
         let threads_to_sum = self.nreplicas * t * x; // each thread handles y*z*4 edges
 
-        let max_edge_sum = 6 * (self.potential_size - 1);
+        let max_edge_sum = self.edge_potential_size;
         let hist_size = 2 * max_edge_sum + 1;
 
         let mut sum_buffer = self
@@ -1427,6 +1432,66 @@ impl CudaBackend {
         let mut builder = self.stream.launch_builder(
             self.function_lookup
                 .get("partial_count_edges")
+                .unwrap(),
+        );
+        builder.arg(&mut self.state);
+        builder.arg(&mut sum_buffer);
+        builder.arg(&max_edge_sum);
+        builder.arg(&self.nreplicas);
+        builder.arg(&self.bounds.t);
+        builder.arg(&self.bounds.x);
+        builder.arg(&self.bounds.y);
+        builder.arg(&self.bounds.z);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .map_err(CudaError::from)
+        }?;
+
+        // sum_buffer now has replicas * t * x blocks of size hist_size.
+        // Fold in the t*x dimension to get one histogram per replica.
+        let threads_to_sum = self.nreplicas * hist_size;
+        let num_steps = t * x;
+        let mut builder = self
+            .stream
+            .launch_builder(self.function_lookup.get("sum_int_buffer").unwrap());
+        builder.arg(&mut sum_buffer);
+        builder.arg(&threads_to_sum);
+        builder.arg(&num_steps);
+        unsafe {
+            builder
+                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .map_err(CudaError::from)
+        }?;
+
+        let subslice = sum_buffer.slice(0..threads_to_sum);
+        let edges = self
+            .stream
+            .memcpy_dtov(&subslice)
+            .map(|v| {
+                Array2::from_shape_vec((self.nreplicas, hist_size), v).unwrap()
+            })
+            .map_err(CudaError::from)?;
+
+        Ok(edges)
+    }
+
+    pub fn get_edge_counts_boundary(&mut self) -> Result<Array2<u32>, CudaError> {
+        let (t, x, _y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
+        let threads_to_sum = self.nreplicas * t * x; // each thread handles y*z*4 edges
+
+        let max_edge_sum = self.edge_potential_size;
+        let hist_size = 2 * max_edge_sum + 1;
+
+        let mut sum_buffer = self
+            .stream
+            .alloc_zeros::<u32>(threads_to_sum * hist_size)
+            .map_err(CudaError::from)?;
+
+        // Initial partial counts: one histogram per (replica, t, x) thread
+        let mut builder = self.stream.launch_builder(
+            self.function_lookup
+                .get("partial_count_edges_boundary")
                 .unwrap(),
         );
         builder.arg(&mut self.state);
@@ -1814,9 +1879,14 @@ impl CudaBackend {
         plaquette_buffer: &CudaSlice<i32>,
         bounds: SiteIndex,
         nreplicas: usize,
+        boundary_selector: Option<bool>,
     ) -> Result<(), CudaError> {
         let (t, x, y, z) = (bounds.t, bounds.x, bounds.y, bounds.z);
-        let num_edges = nreplicas * t * x * y * z * 4;
+
+        let num_edges = match boundary_selector {
+            None => nreplicas * t * x * y * z * 4,
+            Some(_) => nreplicas * t * x * y * 3,
+        };
 
         let mut builder = stream.launch_builder(calculate_edge_sums);
         builder.arg(plaquette_buffer);
@@ -1826,6 +1896,9 @@ impl CudaBackend {
         builder.arg(&x);
         builder.arg(&y);
         builder.arg(&z);
+        if let Some(b) = boundary_selector.as_ref() {
+            builder.arg(b);
+        }
 
         unsafe {
             builder
@@ -1847,6 +1920,7 @@ impl CudaBackend {
             plaquette_buffer,
             self.bounds.clone(),
             self.nreplicas,
+            None,
         )
     }
 
