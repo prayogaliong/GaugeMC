@@ -20,6 +20,8 @@ log = { version = "0.4", optional = true }
 env_logger = { version = "0.11", optional = true }
 cudarc = { version = "0.17", optional = true, features = ["cuda-version-from-build-system"] }
 hashbrown = { version = "0.15", optional = true }
+zip = { version = "2.4.2", default-features = false }
+rustfft = "6.4.1"
 
 [dependencies.ndarray]
 version = "0.16"
