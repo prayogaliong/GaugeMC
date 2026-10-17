@@ -15,13 +15,13 @@ fn main() -> Result<(), CudaError> {
     let mut vns = Array2::zeros((num_replicas, nvns));
     vns.axis_iter_mut(Axis(0))
         .enumerate()
-        .for_each(|(i, mut v)| {
+        .for_each(|(_i, mut v)| {
             v.iter_mut().enumerate().for_each(|(j, v)| {
                 // *v = ((i + 1) * (j.pow(2))) as f32 / 2.0;
                 *v = match j {
                     0 => 0.0,
                     1 => 0.5,
-                    _ => 1000.0
+                    _ => 1000.0,
                 }
             })
         });

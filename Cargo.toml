@@ -1,43 +1,32 @@
 [package]
 name = "gaugemc"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 
 [features]
 default = ["gpu-cuda", "hashbrown-hashing"]
-gpu-wgpu = ["wgpu", "bytemuck", "pollster", "log", "env_logger"]
 gpu-cuda = ["cudarc"]
 hashbrown-hashing = ["hashbrown"]
 
 [dependencies]
-rayon = "1.10"
+rayon = "1.12"
 num-traits = "0.2"
-ndarray-rand = "0.15"
-wgpu = { version = "0.20", optional = true }
-bytemuck = { version = "1.14", features = ["derive"], optional = true }
-pollster = { version = "0.4", optional = true }
-log = { version = "0.4", optional = true }
-env_logger = { version = "0.11", optional = true }
-cudarc = { version = "0.17", optional = true, features = ["cuda-version-from-build-system"] }
-hashbrown = { version = "0.15", optional = true }
-zip = { version = "2.4.2", default-features = false }
+ndarray-rand = "0.16"
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system"] }
+hashbrown = { version = "0.17", optional = true }
+zip = { version = "6.0", default-features = false }
 rustfft = "6.4.1"
 
 [dependencies.ndarray]
-version = "0.16"
+version = "0.17"
 features = ["rayon"]
 
 [dev-dependencies]
 env_logger = "0.11"
-pollster = "0.4"
-ndarray-npy = "0.9"
+ndarray-npy = "0.10"
 log = "0.4"
 scilib = "1.0"
 num-complex = "0.4"
-
-[[example]]
-name = "simple_gpu"
-required-features = ["gpu-wgpu"]
 
 [[example]]
 name = "simple_cuda"
@@ -49,7 +38,3 @@ name = "cpu_bench"
 [[bench]]
 name = "cuda_bench"
 required-features = ["gpu-cuda"]
-
-[[bench]]
-name = "wgpu_bench"
-required-features = ["gpu-wgpu"]

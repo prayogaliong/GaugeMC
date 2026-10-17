@@ -8,9 +8,9 @@ use cudarc::driver::{
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileError, CompileOptions};
 #[cfg(feature = "hashbrown-hashing")]
 use hashbrown::HashMap;
-use ndarray::{Array1, Array2, Array4, Array5, Array6, ArrayView1, ArrayView2, ArrayView6, Axis};
+use ndarray::{Array1, Array2, Array5, Array6, ArrayView1, ArrayView2, ArrayView6, Axis};
 use ndarray_rand::rand::prelude::SliceRandom;
-use ndarray_rand::rand::{random, thread_rng, Rng};
+use ndarray_rand::rand::{random, Rng};
 use rayon::prelude::*;
 #[cfg(not(feature = "hashbrown-hashing"))]
 use std::collections::HashMap;
@@ -80,7 +80,7 @@ enum RedirectArrays {
 }
 
 impl RedirectArrays {
-    fn unwrap(&mut self, n: usize) -> (ArrayView1<u32>, ArrayView1<u32>) {
+    fn unwrap(&mut self, n: usize) -> (ArrayView1<'_, u32>, ArrayView1<'_, u32>) {
         match self {
             RedirectArrays::None => {
                 *self = Self::new((0..n as u32).collect::<Vec<_>>());
@@ -411,7 +411,7 @@ impl CudaBackend {
         static LAUNCH_CONFIG_SIZE: LazyLock<Option<u32>> = LazyLock::new(|| {
             env::var("GAUGEMC_BLOCK_SIZE").ok().map(|s| {
                 s.parse()
-                    .expect("Could not parse LAUNCH_CONFIG_SIZE as positive integer.")
+                    .expect("Could not parse GAUGEMC_BLOCK_SIZE as positive integer.")
             })
         });
         match &*LAUNCH_CONFIG_SIZE {
@@ -483,7 +483,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(self.nreplicas as u32))
+                .launch(Self::get_launch_config(self.nreplicas as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -539,7 +539,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(self.nreplicas as u32))
+                .launch(Self::get_launch_config(self.nreplicas as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -610,7 +610,7 @@ impl CudaBackend {
                 builder.arg(&yz);
                 unsafe {
                     builder
-                        .launch(LaunchConfig::for_num_elems(self.nreplicas as u32))
+                        .launch(Self::get_launch_config(self.nreplicas as u32))
                         .map_err(CudaError::from)
                 }?;
 
@@ -650,7 +650,7 @@ impl CudaBackend {
                 builder.arg(&yz);
                 unsafe {
                     builder
-                        .launch(LaunchConfig::for_num_elems(self.nreplicas as u32))
+                        .launch(Self::get_launch_config(self.nreplicas as u32))
                         .map_err(CudaError::from)
                 }?;
 
@@ -691,9 +691,9 @@ impl CudaBackend {
             None => CudaError::value_error("Initialization has not been run."),
             Some(WilsonLoopData::AspectRatios {
                 plaquette_type,
-                mut times_run,
+                times_run,
                 aspect_ratios,
-                mut probs_slice,
+                probs_slice,
             }) => {
                 self.stream
                     .memcpy_dtoh(&probs_slice, output)
@@ -762,8 +762,10 @@ impl CudaBackend {
     }
 
     pub fn parallel_tempering_step(&mut self, swaps: &[(usize, usize)]) -> Result<(), CudaError> {
-        let mut rng = thread_rng();
-        let rand_values = (0..self.nreplicas).map(|_| rng.gen()).collect::<Vec<f32>>();
+        let mut rng = ndarray_rand::rand::rng();
+        let rand_values = (0..self.nreplicas)
+            .map(|_| rng.random())
+            .collect::<Vec<f32>>();
         self.parallel_tempering_step_with_rand(swaps, &rand_values)
     }
 
@@ -818,7 +820,7 @@ impl CudaBackend {
         let (t, x, y, z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
         let output = self
             .stream
-            .memcpy_dtov(&self.state)
+            .clone_dtoh(&self.state)
             .map_err(CudaError::from)?;
         let mut plaquettes =
             Array6::from_shape_vec((self.nreplicas, t, x, y, z, 6), output).unwrap();
@@ -862,7 +864,7 @@ impl CudaBackend {
 
         let output = self
             .stream
-            .memcpy_dtov(&edge_buffer)
+            .clone_dtoh(&edge_buffer)
             .map_err(CudaError::from)?;
 
         let mut edges = Array6::from_shape_vec((self.nreplicas, t, x, y, z, 4), output).unwrap();
@@ -1042,7 +1044,7 @@ impl CudaBackend {
 
         let output = self
             .stream
-            .memcpy_dtov(&coord_buffer)
+            .clone_dtoh(&coord_buffer)
             .map_err(CudaError::from)?;
 
         let mut coords = Array5::from_shape_vec((self.nreplicas, t, x, y, z), output).unwrap();
@@ -1091,7 +1093,7 @@ impl CudaBackend {
 
         let output = self
             .stream
-            .memcpy_dtov(&output_buffer)
+            .clone_dtoh(&output_buffer)
             .map_err(CudaError::from)?;
 
         let mut corners_for_plaquettes =
@@ -1127,6 +1129,7 @@ impl CudaBackend {
             .fill_with_uniform(&mut self.rng_buffer)
             .map_err(CudaError::from)?;
 
+        // global_update_sweep(&mut self.state, &self.potential_buffer, ...)
         let mut builder = self
             .stream
             .launch_builder(self.function_lookup.get("global_update_sweep").unwrap());
@@ -1144,7 +1147,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(update_planes as u32))
+                .launch(Self::get_launch_config(update_planes as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -1170,7 +1173,7 @@ impl CudaBackend {
 
         let (t, x, y, z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
         let planes = [y * z, x * z, x * y, t * z, t * y, t * x];
-        let needed_threads = planes[plaquette_type as usize] / 2;
+        let needed_threads = self.nreplicas * planes[plaquette_type as usize] / 2;
 
         // Can we not subslice it?
         self.cuda_rng
@@ -1195,7 +1198,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(needed_threads as u32))
+                .launch(Self::get_launch_config(needed_threads as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -1224,13 +1227,13 @@ impl CudaBackend {
         builder.arg(&self.bounds.z);
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .launch(Self::get_launch_config(threads_to_sum as u32))
                 .map_err(CudaError::from)
         }?;
 
         let windings = self
             .stream
-            .memcpy_dtov(&sum_buffer)
+            .clone_dtoh(&sum_buffer)
             .map(|x| Array2::from_shape_vec((self.nreplicas, 6), x).unwrap())
             .map_err(CudaError::from)?;
 
@@ -1309,7 +1312,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(num_threads as u32))
+                .launch(Self::get_launch_config(num_threads as u32))
                 .map_err(CudaError::from)
         }?;
         Ok(())
@@ -1319,7 +1322,7 @@ impl CudaBackend {
         let counts_data_struct = self.plaquette_pair_accumulator.as_mut();
         if let Some(counts_data_struct) = counts_data_struct {
             self.stream
-                .memcpy_dtov(&mut counts_data_struct.buffer)
+                .clone_dtoh(&mut counts_data_struct.buffer)
                 .map(|v| -> Option<Array5<u32>> {
                     let num_ints = 2 * counts_data_struct.max_abs_value as usize + 1;
                     Array5::from_shape_vec(
@@ -1346,7 +1349,7 @@ impl CudaBackend {
 
     pub fn get_plaquette_counts(&mut self) -> Result<Array2<u32>, CudaError> {
         let (t, x, _y, _z) = (self.bounds.t, self.bounds.x, self.bounds.y, self.bounds.z);
-        let mut threads_to_sum = self.nreplicas * t * x; // each thread starts with y*z*6
+        let threads_to_sum = self.nreplicas * t * x; // each thread starts with y*z*6
 
         let mut sum_buffer = self
             .stream
@@ -1368,7 +1371,7 @@ impl CudaBackend {
         builder.arg(&self.bounds.z);
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .launch(Self::get_launch_config(threads_to_sum as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -1385,14 +1388,14 @@ impl CudaBackend {
         builder.arg(&num_steps);
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .launch(Self::get_launch_config(threads_to_sum as u32))
                 .map_err(CudaError::from)
         }?;
 
         let subslice = sum_buffer.slice(0..threads_to_sum);
         let plaquettes = self
             .stream
-            .memcpy_dtov(&subslice)
+            .clone_dtoh(&subslice)
             .map(|v| {
                 Array2::from_shape_vec((self.nreplicas, 2 * self.potential_size - 1), v).unwrap()
             })
@@ -1562,7 +1565,7 @@ impl CudaBackend {
         builder.arg(&self.bounds.z);
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                .launch(Self::get_launch_config(threads_to_sum as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -1577,7 +1580,7 @@ impl CudaBackend {
             builder.arg(&n);
             unsafe {
                 builder
-                    .launch(LaunchConfig::for_num_elems(threads_to_sum as u32))
+                    .launch(Self::get_launch_config(threads_to_sum as u32))
                     .map_err(CudaError::from)
             }?;
         }
@@ -1586,7 +1589,7 @@ impl CudaBackend {
         let subslice = sum_buffer.slice(0..self.nreplicas);
         let energies = self
             .stream
-            .memcpy_dtov(&subslice)
+            .clone_dtoh(&subslice)
             .map(Array1::from_vec)
             .map_err(CudaError::from)?;
 
@@ -1608,7 +1611,7 @@ impl CudaBackend {
         #[cfg(debug_assertions)]
         let original_edge_violations = self.get_edge_violations()?;
 
-        let mut rng = thread_rng();
+        let mut rng = ndarray_rand::rand::rng();
         let mut local_update_types = self.local_update_types.take().unwrap();
         local_update_types.shuffle(&mut rng);
         let res = local_update_types
@@ -1655,7 +1658,7 @@ impl CudaBackend {
         builder.arg(&self.bounds.z);
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(n as u32))
+                .launch(Self::get_launch_config(n as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -1669,7 +1672,7 @@ impl CudaBackend {
         // #[cfg(debug_assertions)]
         // let original_edge_violations = self.get_edge_violations()?;
 
-        let mut rng = thread_rng();
+        let mut rng = ndarray_rand::rand::rng();
         let mut charge_update_types = self.charge_update_types.take().unwrap();
         charge_update_types.shuffle(&mut rng);
         let res = charge_update_types
@@ -1779,7 +1782,7 @@ impl CudaBackend {
         builder.arg(&self.bounds.z);
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(n as u32))
+                .launch(Self::get_launch_config(n as u32))
                 .map_err(CudaError::from)
         }?;
 
@@ -1836,7 +1839,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(num_edges as u32))
+                .launch(Self::get_launch_config(num_edges as u32))
                 .map_err(CudaError::from)
         }
         .map(|_| ())
@@ -1866,7 +1869,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(num_sites as u32))
+                .launch(Self::get_launch_config(num_sites as u32))
                 .map_err(CudaError::from)
         }
         .map(|_| ())
@@ -1902,7 +1905,7 @@ impl CudaBackend {
 
         unsafe {
             builder
-                .launch(LaunchConfig::for_num_elems(num_edges as u32))
+                .launch(Self::get_launch_config(num_edges as u32))
                 .map_err(CudaError::from)
         }
         .map(|_| ())
@@ -2186,7 +2189,7 @@ mod tests {
     fn test_get_plaquettes_single_inc_random_fill() -> Result<(), CudaError> {
         let (r, t, x, y, z) = (16, 6, 6, 6, 6);
         for _ in 0..10 {
-            let state = Array6::random((r, t, x, y, z, 4), Uniform::new(-32, 32));
+            let state = Array6::random((r, t, x, y, z, 4), Uniform::new(-32, 32).unwrap());
             let state = DualState::new_volumes(state);
             let mut state = CudaBackend::new(
                 SiteIndex::new(t, x, y, z),
@@ -2664,7 +2667,11 @@ mod tests {
             None,
             None,
         )?;
-        state.run_global_update_sweep()?;
+
+        // Metropolis updates need to randomly choose the correct direction.
+        for _ in 0..32 {
+            state.run_global_update_sweep()?;
+        }
 
         let plaqs = state.get_plaquettes()?;
         // We should get global planes in replica 0 and nowhere else.
@@ -2888,28 +2895,19 @@ mod tests {
         let (r, d) = (3, 4);
 
         let mut initial_state = Array6::zeros((r, d, d, d, d, 6));
-        initial_state
-            .axis_iter_mut(Axis(0))
-            .enumerate()
-            .for_each(|(rr, mut x)| {
-                for i in 0..rr {
-                    x.slice_mut(s![.., .., i, i, 0])
-                        .iter_mut()
-                        .for_each(|x| *x = 1);
-                }
-            });
         let state = DualState::new_plaquettes(initial_state.clone());
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
-            make_custom_simple_potentials(r, 4, |_, _| 0.0),
-            make_custom_simple_potentials(r, 4, |_, _| 0.0),
+            make_custom_simple_potentials(r, 2, |_, _| 0.0),
             Some(state),
             Some(31415),
             None,
             Some(Array1::from_vec((0..r).map(|_| 5.0).collect())),
         )?;
 
-        state.run_global_update_sweep()?;
+        for _ in 0..32 {
+            state.run_global_update_sweep()?;
+        }
 
         let initial_rep_winds = initial_state
             .sum_axis(Axis(1))
@@ -2938,28 +2936,19 @@ mod tests {
         let (r, d) = (3, 4);
 
         let mut initial_state = Array6::zeros((r, d, d, d, d, 6));
-        initial_state
-            .axis_iter_mut(Axis(0))
-            .enumerate()
-            .for_each(|(rr, mut x)| {
-                for i in 0..rr {
-                    x.slice_mut(s![.., .., i, i, 0])
-                        .iter_mut()
-                        .for_each(|x| *x = 1);
-                }
-            });
         let state = DualState::new_plaquettes(initial_state.clone());
         let mut state = CudaBackend::new(
             SiteIndex::new(d, d, d, d),
-            make_custom_simple_potentials(r, 4, |_, _| 0.0),
-            make_custom_simple_potentials(r, 4, |_, _| 0.0),
+            make_custom_simple_potentials(r, 2, |_, _| 0.0),
             Some(state),
             Some(31415),
             None,
             Some(Array1::from_vec((0..r).map(|_| -5.0).collect())),
         )?;
 
-        state.run_global_update_sweep()?;
+        for _ in 0..32 {
+            state.run_global_update_sweep()?;
+        }
 
         let initial_rep_winds = initial_state
             .sum_axis(Axis(1))
@@ -3143,7 +3132,7 @@ mod tests {
         }
 
         state.calculate_wilson_loop_transition_probs()?;
-        let result = state.get_wilson_loop_transition_probs()?;
+        let _result = state.get_wilson_loop_transition_probs()?;
 
         Ok(())
     }
@@ -3170,7 +3159,7 @@ mod tests {
         }
 
         state.calculate_wilson_loop_transition_probs()?;
-        let result = state.get_wilson_loop_transition_probs()?;
+        let _result = state.get_wilson_loop_transition_probs()?;
 
         Ok(())
     }
@@ -3233,7 +3222,10 @@ mod tests {
         let windings = state.get_winding_per_replica()?;
         assert_eq!(windings, arr2(&[[2, 0, 0, 0, 0, 0]]));
 
-        state.run_plane_shift_with_offset(0, false)?;
+        // Run enough times for metropolis to choose the right update direction.
+        for _ in 0..32 {
+            state.run_plane_shift_with_offset(0, false)?;
+        }
 
         let windings = state.get_winding_per_replica()?;
         assert_eq!(windings, arr2(&[[2, 0, 0, 0, 0, 0]]));
@@ -3403,7 +3395,7 @@ mod tests {
         state
             .axis_iter_mut(Axis(0))
             .enumerate()
-            .for_each(|(rr, mut x)| {
+            .for_each(|(_rr, mut x)| {
                 x[(0, 0, 0, 0, 0)] = 0;
                 x[(0, 0, 0, 1, 0)] = 1;
             });
